@@ -43,6 +43,8 @@ class Coordinator:
                     await self.get_task_status(message, writer)
                 elif message["type"] == "task_result":
                     await self.handle_task_result(message)
+                elif message["type"] == "chunk_result":
+                    await self.handle_chunk_result(message)
 
         except Exception as e:
             logging.error(f"Error handling connection: {e}")
@@ -115,10 +117,8 @@ class Coordinator:
         await writer.drain()
 
     async def submit_task_map(self, message, reader, writer, client_id):
-        """
-        Обработка задачи с распределением элементов коллекции на несколько воркеров.
-        """
         if not self.workers:
+            logging.warning("No workers available to handle the map task.")
             writer.write((json.dumps({"type": "task_rejected", "reason": "No workers available"}) + "\n").encode())
             await writer.drain()
             return
@@ -126,36 +126,32 @@ class Coordinator:
         task_id = str(uuid.uuid4())
         func_name = message["func_name"]
         args = message["args"]
-        num_chunks = len(self.workers)
-        chunk_size = len(args) // num_chunks
-        chunks = [args[i:i + chunk_size] for i in range(0, len(args), chunk_size)]
+        chunks = [[arg] for arg in args]  # Разделяем коллекцию по одному аргументу
+        logging.info(f"Task {task_id}: Split into {len(chunks)} chunks.")
 
-        # Разделяем задачу на части и отправляем каждому воркеру
-        results = []
+        worker_list = list(self.workers.items())
+        num_workers = len(worker_list)
+
         for i, chunk in enumerate(chunks):
-            worker_id, (worker_reader, worker_writer, code_info) = list(self.workers.items())[i]
+            worker_id, (worker_reader, worker_writer, code_info) = worker_list[i % num_workers]
             task_message = (json.dumps({
-                "type": "task",
+                "type": "map_task",
                 "task_id": task_id,
+                "chunk_id": i,
                 "func_source": message["func_source"],
                 "func_name": func_name,
                 "args": chunk,
                 "kwargs": message["kwargs"],
             }) + "\n").encode()
+
+            logging.info(f"Task {task_id}, chunk {i}: Assigned to worker {worker_id}.")
             worker_writer.write(task_message)
             await worker_writer.drain()
 
-            result = await self.collect_result(task_id)
-            results.append(result)
-
-        # Объединяем результаты и отправляем обратно клиенту
-        final_result = sum(results)  # Пример для числовых данных
-        writer.write((json.dumps({
-            "type": "task_result",
-            "task_id": task_id,
-            "status": "completed",
-            "result": final_result
-        }) + "\n").encode())
+        self.tasks[task_id] = {"status": "in progress", "result": None, "chunks": len(chunks)}
+        self.clients[task_id] = (reader, writer)
+        logging.info(f"Task {task_id} with {len(chunks)} chunks distributed to {num_workers} workers.")
+        writer.write((json.dumps({"type": "task_accepted", "task_id": task_id}) + "\n").encode())
         await writer.drain()
 
     async def collect_result(self, task_id):
@@ -177,7 +173,8 @@ class Coordinator:
             await worker_writer.drain()
 
             self.tasks[task_id]["status"] = "cancelled"
-            writer.write((json.dumps({"type": "task_cancelled", "task_id": task_id, "status": "cancelled"}) + "\n").encode())
+            writer.write(
+                (json.dumps({"type": "task_cancelled", "task_id": task_id, "status": "cancelled"}) + "\n").encode())
         else:
             writer.write((json.dumps({"type": "task_not_found", "task_id": task_id}) + "\n").encode())
         await writer.drain()
@@ -199,6 +196,53 @@ class Coordinator:
                 client_reader, client_writer = self.clients.pop(task_id)
                 client_writer.write((json.dumps(message) + "\n").encode())
                 await client_writer.drain()
+
+    async def handle_chunk_result(self, message):
+        task_id = message["task_id"]
+        chunk_id = message["chunk_id"]
+        chunk_status = message["status"]
+        chunk_result = message["result"]
+
+        if task_id not in self.tasks:
+            logging.warning(f"Received result for unknown task {task_id}. Ignoring.")
+            return
+
+        task = self.tasks[task_id]
+
+        if "collected_results" not in task:
+            task["collected_results"] = []
+
+        if "completed_chunks" not in task:
+            task["completed_chunks"] = 0
+
+        if chunk_status == "completed":
+            task["collected_results"].append(chunk_result)
+            task["completed_chunks"] += 1
+            logging.info(f"Task {task_id}, chunk {chunk_id}: Result collected successfully.")
+        elif chunk_status == "failed":
+            logging.warning(f"Task {task_id}, chunk {chunk_id}: Failed with error: {chunk_result}.")
+            task["completed_chunks"] += 1
+        elif chunk_status == "cancelled":
+            logging.info(f"Task {task_id}, chunk {chunk_id}: Cancelled.")
+            task["completed_chunks"] += 1
+
+        if task["completed_chunks"] == task["chunks"]:
+            final_result = task["collected_results"]
+            task["status"] = "completed"
+            task["result"] = final_result
+
+            client_reader, client_writer = self.clients.pop(task_id)
+            if client_writer:
+                result_message = json.dumps({
+                    "type": "task_result",
+                    "task_id": task_id,
+                    "status": "completed",
+                    "result": final_result,
+                }) + "\n"
+                client_writer.write(result_message.encode())
+                await client_writer.drain()
+                client_writer.close()
+                logging.info(f"Task {task_id} completed. Final result - {final_result} sent to client.")
 
 
 if __name__ == "__main__":

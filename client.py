@@ -148,24 +148,42 @@ if __name__ == "__main__":
     async def main():
         # Пример задачи: передаем функцию сложения чисел
         func_source = """
-        def add(x, y):
-            return x + y
+        def compute_fibonacci_sum_of_squares(n):
+            def fibonacci(x):
+                if x <= 1:
+                    return x
+                return fibonacci(x - 1) + fibonacci(x - 2)
+
+            total = 0
+            for i in range(n):
+                fib = fibonacci(i)
+                total += fib ** 2
+            return total
         """
-        func_name = "add"
-        args = (10, 15)
+        func_sq = """
+        def sq(n):
+            return n * n
+        """
+        func_name = "compute_fibonacci_sum_of_squares"
+        func_name_sq = "sq"
+        args = (1,)
         kwargs = {}
 
-        task_id = await client.submit_task(func_source, func_name, args, kwargs)
+        #task_id = await client.submit_task(func_source, func_name, args, kwargs)
+        task_id = await client.submit_task_map(func_sq, func_name_sq, (1, 2, 3, 4, 5), kwargs)
+        while True:
+            status = await client.get_task_status(task_id)
+            logging.info(f"Task {task_id} status: {status['status']}")
+            if status['status'] == "completed":
+                logging.info(f"Task {task_id} completed successfully. Result: {status['result']}")
+                break
+            elif status['status'] == "in progress":
+                #await client.cancel_task(task_id)
+                pass
+            else:
+                logging.error(f"Task {task_id} failed with status: {status['status']}")
+                break
+            await asyncio.sleep(1)
 
-        status = await client.get_task_status(task_id)
-
-        logging.info(f"Task {task_id} status: {status['status']}")
-
-        await asyncio.sleep(1)
-
-        if status["status"] == "completed":
-            logging.info(f"Task {task_id} completed successfully. Result: {status['result']}")
-        else:
-            logging.error(f"Task {task_id} failed with status: {status['status']}")
 
     asyncio.run(main())

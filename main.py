@@ -6,6 +6,7 @@ from worker import Worker
 
 logging.basicConfig(level=logging.INFO)
 
+
 async def main():
     coord_host = "localhost"
     coord_port = 8765
@@ -17,7 +18,6 @@ async def main():
 
     coord_task = asyncio.create_task(coordinator.start_server())
     worker_task = asyncio.create_task(worker.connect_to_coord())
-
 
     func_source = """
     def add(x, y):
@@ -39,6 +39,7 @@ async def main():
         logging.error(f"Task {task_id} failed with status: {status['status']}")
 
     await asyncio.gather(coord_task, worker_task)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
